@@ -1,9 +1,12 @@
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <Adafruit_Fingerprint.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <ArduinoJson.h>
+#include <HTTPClient.h>
 
 // Configuración del sensor de huella AS608
 #define RX_PIN 16
@@ -20,9 +23,23 @@ const char* ssid = "Tu_SSID";
 const char* password = "Tu_PASSWORD";
 
 // Configuración de MQTT
-const char* mqtt_server = "IP_PRIVADA_MQTT";
+const char* mqtt_server = "IP_PUBLICA_MQTT"; // IP pública del broker MQTT
+const int mqtt_port = 1883;
+const char* mqtt_username = "mqtt_user";     // Recomendado para seguridad
+const char* mqtt_password = "mqtt_password"; // Recomendado para seguridad
+const char* mqtt_client_id = "ESP32_Votacion";
+const char* mqtt_topic = "votacion";
+
+// API Backend
+const char* api_server = "IP_PUBLICA_BACKEND";
+const int api_port = 3000;
+
+// Variables globales
 WiFiClient espClient;
 PubSubClient client(espClient);
+bool puedeVotar = false;
+unsigned long ultimaOperacion = 0;
+bool esperandoVoto = false;
 
 // Configuración de botones
 #define BOTON_1 18
@@ -30,81 +47,159 @@ PubSubClient client(espClient);
 
 void setup() {
     Serial.begin(115200);
-    
-    // Configuración del sensor de huellas
-    Serial2.begin(57600, SERIAL_8N1, RX_PIN, TX_PIN);
-    finger.begin(57600);
-    if (finger.verifyPassword()) {
-        Serial.println("Sensor de huellas detectado.");
-    } else {
-        Serial.println("No se detectó el sensor de huellas.");
-        while (1);
-    }
 
-    // Configuración del OLED
+    // Iniciar OLED primero para mostrar mensajes de estado
     if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
         Serial.println("Error al iniciar el OLED.");
         while (1);
     }
     display.clearDisplay();
-    
-    // Configuración de WiFi
-    WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println("WiFi conectado");
+    mostrarMensaje("Iniciando sistema...");
 
-    // Configuración de MQTT
-    client.setServer(mqtt_server, 1883);
+    // Configuración del sensor de huellas
+    Serial2.begin(57600, SERIAL_8N1, RX_PIN, TX_PIN);
+    finger.begin(57600);
+    if (finger.verifyPassword()) {
+        Serial.println("Sensor de huellas detectado.");
+        mostrarMensaje("Sensor de huella OK");
+    } else {
+        Serial.println("No se detectó el sensor de huellas.");
+        mostrarMensaje("Error sensor huella");
+        while (1);
+    }
 
     // Configuración de botones
     pinMode(BOTON_1, INPUT_PULLUP);
     pinMode(BOTON_2, INPUT_PULLUP);
+
+    // Configuración de WiFi
+    conectarWiFi();
+
+    // Configuración de MQTT
+    client.setServer(mqtt_server, mqtt_port);
+    client.setCallback(callbackMQTT);
+
+    delay(1000);
+    mostrarMensaje("Sistema listo");
+    delay(1000);
 }
 
 void loop() {
+    // Verificar conexiones
+    if (WiFi.status() != WL_CONNECTED) {
+        conectarWiFi();
+    }
+
     if (!client.connected()) {
         reconnectMQTT();
     }
     client.loop();
 
-    // Mensaje en OLED
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(WHITE);
-    display.setCursor(0, 10);
-    display.println("Verifique si puede votar");
-    display.display();
+    // Estado normal: esperando huella
+    if (!esperandoVoto) {
+        // Cada 3 segundos actualizar mensaje
+        if (millis() - ultimaOperacion > 3000) {
+            mostrarMensaje("Coloque su huella\npara votar");
+            ultimaOperacion = millis();
+        }
 
-    // Escanea la huella
-    int id = leerHuella();
-    if (id == -1) {
-        return;
-    }
+        // Escanear huella
+        int id = leerHuella();
+        if (id > 0) {
+            Serial.print("Huella detectada, ID: ");
+            Serial.println(id);
+            mostrarMensaje("Verificando...");
 
-    // Verificar en la base de datos
-    if (verificarHuella(id)) {
-        mostrarMensaje("Usted no puede votar");
-    } else {
-        registrarHuella(id);
-        mostrarMensaje("Botón 1 -> Marco\nBotón 2 -> Nacu");
+            // Verificar si ya votó
+            puedeVotar = !verificarHuella(id);
 
-        // Esperar voto
-        while (true) {
-            if (digitalRead(BOTON_1) == LOW) {
-                enviarVoto("Marco");
-                break;
-            }
-            if (digitalRead(BOTON_2) == LOW) {
-                enviarVoto("Nacu");
-                break;
+            if (puedeVotar) {
+                mostrarMensaje("Seleccione candidato:\nBtn1: Marco\nBtn2: Nacu");
+                esperandoVoto = true;
+                // Registrar que esta huella está votando
+                registrarHuella(id);
+            } else {
+                mostrarMensaje("Ya ha votado\ncon esta huella");
+                delay(3000);
             }
         }
     }
+    // Estado de espera de voto
+    else {
+        if (digitalRead(BOTON_1) == LOW) {
+            enviarVoto("Marco");
+            esperandoVoto = false;
+            delay(1000); // Evitar rebotes
+        }
 
-    delay(2000);
+        if (digitalRead(BOTON_2) == LOW) {
+            enviarVoto("Nacu");
+            esperandoVoto = false;
+            delay(1000); // Evitar rebotes
+        }
+
+        // Timeout para cancelar votación después de 30 segundos
+        if (millis() - ultimaOperacion > 30000) {
+            mostrarMensaje("Tiempo expirado");
+            esperandoVoto = false;
+            delay(2000);
+        }
+    }
+}
+
+void conectarWiFi() {
+    mostrarMensaje("Conectando WiFi...");
+    WiFi.begin(ssid, password);
+
+    // Esperar conexión con timeout
+    unsigned long startTime = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startTime < 20000) {
+        delay(500);
+        Serial.print(".");
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nWiFi conectado");
+        Serial.print("IP: ");
+        Serial.println(WiFi.localIP());
+        mostrarMensaje("WiFi conectado");
+    } else {
+        Serial.println("\nError de conexión WiFi");
+        mostrarMensaje("Error WiFi\nReintentando...");
+    }
+    delay(1000);
+}
+
+void reconnectMQTT() {
+    int intentos = 0;
+    while (!client.connected() && intentos < 5) {
+        Serial.print("Conectando a MQTT...");
+        mostrarMensaje("Conectando MQTT...");
+
+        if (client.connect(mqtt_client_id, mqtt_username, mqtt_password)) {
+            Serial.println("Conectado");
+            mostrarMensaje("MQTT Conectado");
+            client.subscribe(mqtt_topic);
+        } else {
+            Serial.print("Error, rc=");
+            Serial.print(client.state());
+            Serial.println(" Reintentando...");
+            mostrarMensaje("Error MQTT");
+            delay(2000);
+        }
+        intentos++;
+    }
+}
+
+void callbackMQTT(char* topic, byte* payload, unsigned int length) {
+    // Procesar mensajes MQTT recibidos si es necesario
+    Serial.print("Mensaje recibido [");
+    Serial.print(topic);
+    Serial.print("]: ");
+    for (int i = 0; i < length; i++) {
+        Serial.print((char)payload[i]);
+    }
+    Serial.println();
 }
 
 int leerHuella() {
@@ -117,67 +212,65 @@ int leerHuella() {
     p = finger.fingerFastSearch();
     if (p != FINGERPRINT_OK) return -1;
 
-    Serial.print("Huella detectada, ID: ");
-    Serial.println(finger.fingerID);
     return finger.fingerID;
 }
 
 bool verificarHuella(int id) {
-    // Enviar solicitud HTTP al backend para verificar si la huella está en la base de datos
-    WiFiClient clientHttp;
-    if (!clientHttp.connect("IP_PRIVADA_DATABASE", 3000)) {
-        Serial.println("Error de conexión con el servidor");
-        return false;
-    }
-    
-    String request = String("POST /verificar-huella HTTP/1.1\r\n") +
-                     "Host: IP_PRIVADA_DATABASE\r\n" +
-                     "Content-Type: application/json\r\n" +
-                     "Content-Length: " + String(String("{\"huella\":\"" + String(id) + "\"}").length()) + "\r\n\r\n" +
-                     "{\"huella\":\"" + String(id) + "\"}";
-    
-    clientHttp.print(request);
-    delay(500);
-    
-    while (clientHttp.available()) {
-        String response = clientHttp.readString();
-        if (response.indexOf("\"registrado\":true") > 0) {
-            return true;
+    HTTPClient http;
+    String url = "http://" + String(api_server) + ":" + String(api_port) + "/verificar-huella";
+
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+
+    StaticJsonDocument<200> doc;
+    doc["huella"] = String(id);
+
+    String requestBody;
+    serializeJson(doc, requestBody);
+
+    int httpCode = http.POST(requestBody);
+    bool yaVoto = false;
+
+    if (httpCode > 0) {
+        if (httpCode == HTTP_CODE_OK) {
+            String payload = http.getString();
+            StaticJsonDocument<200> responseDoc;
+            deserializeJson(responseDoc, payload);
+            yaVoto = responseDoc["registrado"];
         }
+    } else {
+        Serial.printf("Error HTTP: %s\n", http.errorToString(httpCode).c_str());
     }
-    return false;
+
+    http.end();
+    return yaVoto;
 }
 
 void registrarHuella(int id) {
-    String mensaje = "registro:" + String(id);
-    client.publish("votacion", mensaje.c_str());
+    String mensaje = "{\"accion\":\"registro\",\"huella\":\"" + String(id) + "\"}";
+    client.publish(mqtt_topic, mensaje.c_str());
     Serial.println("Huella registrada en MQTT");
+    ultimaOperacion = millis();
 }
 
 void enviarVoto(String candidato) {
-    String mensaje = "voto:" + candidato;
-    client.publish("votacion", mensaje.c_str());
-    Serial.println("Voto enviado: " + candidato);
-    mostrarMensaje("Voto enviado!");
+    String mensaje = "{\"accion\":\"voto\",\"candidato\":\"" + candidato + "\"}";
+    if (client.publish(mqtt_topic, mensaje.c_str())) {
+        Serial.println("Voto enviado: " + candidato);
+        mostrarMensaje("Voto por " + candidato + "\nregistrado!");
+    } else {
+        Serial.println("Error al enviar voto");
+        mostrarMensaje("Error al votar\nIntente de nuevo");
+    }
+    delay(3000);
+    ultimaOperacion = millis();
 }
 
 void mostrarMensaje(String mensaje) {
     display.clearDisplay();
-    display.setCursor(0, 10);
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(0, 0);
     display.println(mensaje);
     display.display();
-}
-
-void reconnectMQTT() {
-    while (!client.connected()) {
-        Serial.print("Intentando conectar a MQTT...");
-        if (client.connect("ESP32_Client")) {
-            Serial.println("Conectado!");
-        } else {
-            Serial.print("Error, rc=");
-            Serial.print(client.state());
-            Serial.println(" Intentando de nuevo en 5s...");
-            delay(5000);
-        }
-    }
 }
