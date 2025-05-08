@@ -1,238 +1,219 @@
-require('dotenv').config();
 const express = require('express');
-const mysql = require('mysql2/promise');
-const mqtt = require('mqtt');
-const http = require('http');
-const { Server } = require('socket.io');
 const cors = require('cors');
-const helmet = require('helmet');
-
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-    cors: {
-        origin: process.env.FRONTEND_URL || '*',
-        methods: ['GET', 'POST']
-    }
-});
+const PORT = process.env.PORT || 3001;
+const db = require('./db');
+const dotenv = require('dotenv');
 
-// Middleware de seguridad
-app.use(helmet());
-app.use(cors({
-    origin: process.env.FRONTEND_URL || '*',
-    methods: ['GET', 'POST']
-}));
+// Middleware
+app.use(cors());
 app.use(express.json());
 
-// Variables de entorno (crear archivo .env)
-const DB_HOST = process.env.DB_HOST || 'localhost';
-const DB_USER = process.env.DB_USER || 'usuario_mysql';
-const DB_PASS = process.env.DB_PASS || 'contraseña_mysql';
-const DB_NAME = process.env.DB_NAME || 'votacion';
-const MQTT_URL = process.env.MQTT_URL || 'mqtt://localhost';
-const MQTT_USER = process.env.MQTT_USER;
-const MQTT_PASS = process.env.MQTT_PASS;
-const PORT = process.env.PORT || 3000;
-
-// Conexión a MySQL con pool de conexiones
-const dbPool = mysql.createPool({
-    host: DB_HOST,
-    user: DB_USER,
-    password: DB_PASS,
-    database: DB_NAME,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
+// Rutas principales
+app.get('/', (req, res) => {
+    res.send('API funcionando');
 });
 
-// Crear tablas si no existen
-async function initializeDB() {
-    try {
-        const connection = await dbPool.getConnection();
+// Obtener todos los candidatos
+app.get('/api/candidatos', (req, res) => {
+    const query = 'SELECT * FROM candidatos ORDER BY id_candidato ASC';
 
-        // Tabla de usuarios (personas que han votado)
-        await connection.execute(`
-      CREATE TABLE IF NOT EXISTS usuarios (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        huella VARCHAR(255) NOT NULL UNIQUE,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-        // Tabla de votos
-        await connection.execute(`
-      CREATE TABLE IF NOT EXISTS votos (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        candidato VARCHAR(255) NOT NULL,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-        connection.release();
-        console.log('Base de datos inicializada correctamente');
-    } catch (err) {
-        console.error('Error inicializando la base de datos:', err);
-        process.exit(1);
-    }
-}
-
-// Opciones MQTT
-const mqttOptions = {
-    clean: true,
-    connectTimeout: 4000,
-    reconnectPeriod: 1000
-};
-
-// Agregar credenciales si están disponibles
-if (MQTT_USER && MQTT_PASS) {
-    mqttOptions.username = MQTT_USER;
-    mqttOptions.password = MQTT_PASS;
-}
-
-// Conectar a MQTT
-const mqttClient = mqtt.connect(MQTT_URL, mqttOptions);
-
-mqttClient.on('connect', () => {
-    console.log('Conectado a MQTT');
-    mqttClient.subscribe('votacion', (err) => {
+    db.query(query, (err, results) => {
         if (err) {
-            console.error('Error al suscribirse al topic:', err);
+            console.error('Error al obtener candidatos:', err);
+            return res.status(500).json({ error: 'Error al obtener candidatos' });
         }
+        res.status(200).json(results);
     });
 });
 
-mqttClient.on('message', async (topic, message) => {
-    try {
-        const data = JSON.parse(message.toString());
-        console.log('Mensaje MQTT recibido:', data);
+// Agregar un nuevo candidato
+app.post('/api/candidatos', (req, res) => {
+    const { nombre } = req.body;
 
-        if (data.accion === 'voto') {
-            const candidato = data.candidato;
-            console.log(`Nuevo voto por: ${candidato}`);
+    if (!nombre || nombre.trim() === '') {
+        return res.status(400).json({ error: 'El nombre del candidato es requerido' });
+    }
 
-            // Insertar voto en la base de datos
-            await dbPool.execute(
-                'INSERT INTO votos (candidato, timestamp) VALUES (?, NOW())',
-                [candidato]
-            );
+    const query = 'INSERT INTO candidatos (nombre) VALUES (?)';
 
-            // Emitir evento a clientes conectados
-            io.emit('nuevoVoto', candidato);
+    db.query(query, [nombre], (err, result) => {
+        if (err) {
+            console.error('Error al agregar candidato:', err);
+            return res.status(500).json({ error: 'Error al agregar candidato' });
+        }
+        res.status(201).json({
+            mensaje: 'Candidato agregado correctamente',
+            id_candidato: result.insertId
+        });
+    });
+});
 
-        } else if (data.accion === 'registro') {
-            const huella = data.huella;
-            console.log(`Registrando huella: ${huella}`);
+// Obtener estadísticas de votación
+app.get('/api/estadisticas', (req, res) => {
+    const query = `
+        SELECT c.id_candidato, c.nombre, COUNT(v.id_voto) as total_votos
+        FROM candidatos c
+        LEFT JOIN votaciones v ON c.id_candidato = v.id_candidato
+        GROUP BY c.id_candidato
+        ORDER BY total_votos DESC
+    `;
 
-            try {
-                await dbPool.execute(
-                    'INSERT INTO usuarios (huella) VALUES (?)',
-                    [huella]
-                );
-                console.log('Huella registrada correctamente');
-            } catch (dbErr) {
-                if (dbErr.code === 'ER_DUP_ENTRY') {
-                    console.log('Huella ya registrada, ignorando');
-                } else {
-                    throw dbErr;
-                }
+    db.query(query, (err, results) => {
+        if (err) {
+            console.error('Error al obtener estadísticas:', err);
+            return res.status(500).json({ error: 'Error al obtener estadísticas' });
+        }
+        res.status(200).json(results);
+    });
+});
+
+// Obtener estadísticas por región
+app.get('/api/estadisticas/region/:region', (req, res) => {
+    const { region } = req.params;
+
+    // Aquí podrías filtrar por región si tuvieras esa columna en tu base de datos
+    // Por ahora devolvemos todos los datos
+    const query = `
+        SELECT c.id_candidato, c.nombre, COUNT(v.id_voto) as total_votos
+        FROM candidatos c
+        LEFT JOIN votaciones v ON c.id_candidato = v.id_candidato
+        GROUP BY c.id_candidato
+        ORDER BY total_votos DESC
+    `;
+
+    db.query(query, (err, results) => {
+        if (err) {
+            console.error('Error al obtener estadísticas por región:', err);
+            return res.status(500).json({ error: 'Error al obtener estadísticas por región' });
+        }
+        res.status(200).json(results);
+    });
+});
+
+// Autenticar usuario por huella digital
+app.post('/api/autenticar', (req, res) => {
+    const { id_huella } = req.body;
+
+    if (!id_huella) {
+        return res.status(400).json({ error: 'Se requiere ID de huella' });
+    }
+
+    const query = 'SELECT * FROM usuarios WHERE id_huella = ?';
+
+    db.query(query, [id_huella], (err, results) => {
+        if (err) {
+            console.error('Error al autenticar usuario:', err);
+            return res.status(500).json({ error: 'Error al autenticar usuario' });
+        }
+
+        if (results.length === 0) {
+            return res.status(404).json({ error: 'Usuario no encontrado' });
+        }
+
+        res.status(200).json({ usuario: results[0] });
+    });
+});
+
+// Registrar un nuevo usuario con huella
+app.post('/api/usuarios', (req, res) => {
+    const { id_huella } = req.body;
+
+    if (!id_huella) {
+        return res.status(400).json({ error: 'Se requiere ID de huella' });
+    }
+
+    // Verificar si el usuario ya existe
+    const checkQuery = 'SELECT * FROM usuarios WHERE id_huella = ?';
+
+    db.query(checkQuery, [id_huella], (err, results) => {
+        if (err) {
+            console.error('Error al verificar usuario:', err);
+            return res.status(500).json({ error: 'Error al verificar usuario' });
+        }
+
+        if (results.length > 0) {
+            return res.status(400).json({ error: 'El usuario ya existe' });
+        }
+
+        // Registrar el nuevo usuario
+        const insertQuery = 'INSERT INTO usuarios (id_huella) VALUES (?)';
+
+        db.query(insertQuery, [id_huella], (err, result) => {
+            if (err) {
+                console.error('Error al registrar usuario:', err);
+                return res.status(500).json({ error: 'Error al registrar usuario' });
             }
-        }
-    } catch (err) {
-        console.error('Error procesando mensaje MQTT:', err);
-    }
-});
 
-mqttClient.on('error', (err) => {
-    console.error('Error MQTT:', err);
-});
-
-// API para obtener votos
-app.get('/votos', async (req, res) => {
-    try {
-        const [rows] = await dbPool.execute(
-            'SELECT candidato, COUNT(*) AS total FROM votos GROUP BY candidato'
-        );
-        res.json(rows);
-    } catch (err) {
-        console.error('Error al obtener votos:', err);
-        res.status(500).json({ error: 'Error interno del servidor' });
-    }
-});
-
-// API para verificar si una huella ya votó
-app.post('/verificar-huella', async (req, res) => {
-    try {
-        const { huella } = req.body;
-
-        if (!huella) {
-            return res.status(400).json({ error: 'Se requiere el parámetro huella' });
-        }
-
-        const [rows] = await dbPool.execute(
-            'SELECT * FROM usuarios WHERE huella = ?',
-            [huella]
-        );
-
-        res.json({ registrado: rows.length > 0 });
-    } catch (err) {
-        console.error('Error al verificar huella:', err);
-        res.status(500).json({ error: 'Error interno del servidor' });
-    }
-});
-
-// Estadísticas generales
-app.get('/estadisticas', async (req, res) => {
-    try {
-        const [totalVotos] = await dbPool.execute('SELECT COUNT(*) as total FROM votos');
-        const [totalVotantes] = await dbPool.execute('SELECT COUNT(*) as total FROM usuarios');
-
-        res.json({
-            totalVotos: totalVotos[0].total,
-            totalVotantes: totalVotantes[0].total
+            res.status(201).json({
+                mensaje: 'Usuario registrado exitosamente',
+                id_usuario: result.insertId
+            });
         });
-    } catch (err) {
-        console.error('Error al obtener estadísticas:', err);
-        res.status(500).json({ error: 'Error interno del servidor' });
-    }
-});
-
-// Health check
-app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'ok' });
-});
-
-// Socket.io para comunicación en tiempo real
-io.on('connection', (socket) => {
-    console.log('Cliente conectado:', socket.id);
-
-    socket.on('disconnect', () => {
-        console.log('Cliente desconectado:', socket.id);
     });
 });
 
-// Inicializar sistema
-async function iniciarServidor() {
-    try {
-        await initializeDB();
+// Registrar un voto
+app.post('/api/votar', (req, res) => {
+    const { id_usuario, id_candidato } = req.body;
 
-        server.listen(PORT, () => {
-            console.log(`Servidor escuchando en el puerto ${PORT}`);
-        });
-    } catch (err) {
-        console.error('Error al iniciar el servidor:', err);
-        process.exit(1);
+    if (!id_usuario || !id_candidato) {
+        return res.status(400).json({ error: 'Se requieren ID de usuario e ID de candidato' });
     }
-}
 
-iniciarServidor();
+    // Verificar si el usuario ya votó
+    const checkQuery = 'SELECT * FROM votaciones WHERE id_usuario = ?';
 
-// Manejo de cierre gracioso
-process.on('SIGTERM', async () => {
-    console.log('Cerrando servidor...');
-    await dbPool.end();
-    mqttClient.end();
-    server.close(() => {
-        console.log('Servidor cerrado');
-        process.exit(0);
+    db.query(checkQuery, [id_usuario], (err, results) => {
+        if (err) {
+            console.error('Error al verificar voto previo:', err);
+            return res.status(500).json({ error: 'Error al verificar voto previo' });
+        }
+
+        if (results.length > 0) {
+            return res.status(400).json({ error: 'El usuario ya ha votado' });
+        }
+
+        // Registrar el voto
+        const insertQuery = 'INSERT INTO votaciones (id_usuario, id_candidato) VALUES (?, ?)';
+
+        db.query(insertQuery, [id_usuario, id_candidato], (err, result) => {
+            if (err) {
+                console.error('Error al registrar voto:', err);
+                return res.status(500).json({ error: 'Error al registrar voto' });
+            }
+
+            res.status(201).json({ mensaje: 'Voto registrado exitosamente', id_voto: result.insertId });
+        });
     });
+});
+
+// Obtener top líderes
+app.get('/api/lideres', (req, res) => {
+    const query = `
+        SELECT c.id_candidato, c.nombre, 
+               COUNT(v.id_voto) as votos_validos,
+               (SELECT COUNT(*) FROM votaciones v2 WHERE v2.id_candidato = c.id_candidato) as votos_totales,
+               CASE 
+                  WHEN c.id_candidato % 2 = 0 THEN 'down'
+                  ELSE 'up'
+               END as tendencia
+        FROM candidatos c
+        LEFT JOIN votaciones v ON c.id_candidato = v.id_candidato
+        GROUP BY c.id_candidato
+        ORDER BY votos_validos DESC
+    `;
+
+    db.query(query, (err, results) => {
+        if (err) {
+            console.error('Error al obtener líderes:', err);
+            return res.status(500).json({ error: 'Error al obtener líderes' });
+        }
+        res.status(200).json(results);
+    });
+});
+
+// Iniciar el servidor
+app.listen(PORT, () => {
+    console.log(`🔥 Servidor escuchando en http://localhost:${PORT}`);
 });
