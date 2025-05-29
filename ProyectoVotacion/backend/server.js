@@ -29,15 +29,15 @@ app.get('/api/candidatos', (req, res) => {
 
 // Agregar un nuevo candidato
 app.post('/api/candidatos', (req, res) => {
-    const { nombre } = req.body;
+    const { nombre, descripcion } = req.body;
 
     if (!nombre || nombre.trim() === '') {
         return res.status(400).json({ error: 'El nombre del candidato es requerido' });
     }
 
-    const query = 'INSERT INTO candidatos (nombre) VALUES (?)';
+    const query = 'INSERT INTO candidatos (nombre, descripcion) VALUES (?, ?)';
 
-    db.query(query, [nombre], (err, result) => {
+    db.query(query, [nombre, descripcion || ''], (err, result) => {
         if (err) {
             console.error('Error al agregar candidato:', err);
             return res.status(500).json({ error: 'Error al agregar candidato' });
@@ -46,6 +46,25 @@ app.post('/api/candidatos', (req, res) => {
             mensaje: 'Candidato agregado correctamente',
             id_candidato: result.insertId
         });
+    });
+});
+
+app.delete('/api/candidatos/:id', (req, res) => {
+    const { id } = req.params;
+
+    const query = 'DELETE FROM candidatos WHERE id_candidato = ?';
+
+    db.query(query, [id], (err, result) => {
+        if (err) {
+            console.error('Error al eliminar candidato:', err);
+            return res.status(500).json({ error: 'Error al eliminar candidato' });
+        }
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Candidato no encontrado' });
+        }
+
+        res.status(200).json({ mensaje: 'Candidato eliminado correctamente' });
     });
 });
 

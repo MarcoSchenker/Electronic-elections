@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
-import { Users, Map, PieChart, Activity, TrendingUp, TrendingDown, Plus } from 'lucide-react';
+import { Users, Map, PieChart, Activity, TrendingUp, TrendingDown, Plus, Trash2 } from 'lucide-react';
 
 const Dashboard = () => {
     const [candidatos, setCandidatos] = useState([]);
@@ -9,6 +9,7 @@ const Dashboard = () => {
     const [activeSection, setActiveSection] = useState('dashboard');
     const [nuevoNombre, setNuevoNombre] = useState('');
     const [mensaje, setMensaje] = useState('');
+    const [nuevaDescripcion, setNuevaDescripcion] = useState('');
 
     // Cargar datos
     useEffect(() => {
@@ -20,7 +21,7 @@ const Dashboard = () => {
     // Función para obtener candidatos
     const fetchCandidatos = async () => {
         try {
-            const response = await fetch('http://localhost:3001/api/candidatos');
+            const response = await fetch('/api/candidatos');
             const data = await response.json();
             setCandidatos(data);
         } catch (error) {
@@ -31,7 +32,7 @@ const Dashboard = () => {
     // Función para obtener estadísticas
     const fetchEstadisticas = async () => {
         try {
-            const response = await fetch('http://localhost:3001/api/estadisticas');
+            const response = await fetch('/api/estadisticas');
             const data = await response.json();
             setEstadisticas(data);
         } catch (error) {
@@ -42,7 +43,7 @@ const Dashboard = () => {
     // Función para obtener líderes
     const fetchLideres = async () => {
         try {
-            const response = await fetch('http://localhost:3001/api/lideres');
+            const response = await fetch('/api/lideres');
             const data = await response.json();
             setLideres(data);
         } catch (error) {
@@ -58,16 +59,20 @@ const Dashboard = () => {
         }
 
         try {
-            const response = await fetch('http://localhost:3001/api/candidatos', {
+            const response = await fetch('/api/candidatos', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ nombre: nuevoNombre }),
+                body: JSON.stringify({
+                    nombre: nuevoNombre,
+                    descripcion: nuevaDescripcion
+                }),
             });
 
             if (response.ok) {
                 setNuevoNombre('');
+                setNuevaDescripcion('');
                 setMensaje('Candidato agregado correctamente');
                 // Refrescar la lista de candidatos
                 fetchCandidatos();
@@ -82,6 +87,29 @@ const Dashboard = () => {
             setMensaje('Error al conectar con el servidor');
         }
     };
+
+    const eliminarCandidato = async (id) => {
+        try {
+            const response = await fetch(`/api/candidatos/${id}`, {
+                method: 'DELETE',
+            });
+
+            if (response.ok) {
+                setMensaje('Candidato eliminado correctamente');
+                // Refrescar la lista de candidatos
+                fetchCandidatos();
+                fetchEstadisticas();
+                fetchLideres();
+            } else {
+                const error = await response.json();
+                setMensaje(`Error: ${error.error}`);
+            }
+        } catch (error) {
+            console.error('Error al eliminar candidato:', error);
+            setMensaje('Error al conectar con el servidor');
+        }
+    };
+
 
     const renderContent = () => {
         switch (activeSection) {
@@ -138,7 +166,14 @@ const Dashboard = () => {
                                         value={nuevoNombre}
                                         onChange={(e) => setNuevoNombre(e.target.value)}
                                     />
-                                    <button className="btn-primary" onClick={agregarCandidato}>
+                                    <textarea
+                                        className="form-input mt-2"
+                                        placeholder="Descripción del candidato"
+                                        value={nuevaDescripcion}
+                                        onChange={(e) => setNuevaDescripcion(e.target.value)}
+                                        rows="3"
+                                    ></textarea>
+                                    <button className="btn-primary mt-2" onClick={agregarCandidato}>
                                         <Plus size={16} /> Agregar
                                     </button>
                                 </div>
@@ -149,15 +184,22 @@ const Dashboard = () => {
                                     <table className="candidates-table">
                                         <thead>
                                         <tr>
-                                            <th>ID</th>
                                             <th>Nombre</th>
+                                            <th>Acciones</th>
                                         </tr>
                                         </thead>
                                         <tbody>
                                         {candidatos.map((candidato) => (
                                             <tr key={candidato.id_candidato}>
-                                                <td>{candidato.id_candidato}</td>
                                                 <td>{candidato.nombre}</td>
+                                                <td>
+                                                    <button
+                                                        className="btn-danger"
+                                                        onClick={() => eliminarCandidato(candidato.id_candidato)}
+                                                    >
+                                                        <Trash2 size={16} />
+                                                    </button>
+                                                </td>
                                             </tr>
                                         ))}
                                         </tbody>
@@ -166,42 +208,27 @@ const Dashboard = () => {
                             </div>
                         </div>
 
-                        <div className="card mt-4">
-                            <div className="card-title">Top Líderes</div>
-                            <table className="leaders-table">
-                                <thead>
-                                <tr>
-                                    <th>Nombre</th>
-                                    <th>Comuna</th>
-                                    <th>Votos Totales</th>
-                                    <th>Actualización</th>
-                                </tr>
-                                </thead>
-                                <tbody>
-                                {lideres.map((lider) => (
-                                    <tr key={lider.id_candidato}>
-                                        <td>{lider.nombre}</td>
-                                        <td>{lider.id_candidato < 4 ? lider.id_candidato : 1}</td>
-                                        <td>{lider.votos_totales ? lider.votos_totales.toLocaleString() : '0'}</td>
-                                        <td>
-                                            {lider.tendencia === 'down' ? (
-                                                <TrendingDown className="trend-down" size={18} />
-                                            ) : (
-                                                <TrendingUp className="trend-up" size={18} />
-                                            )}
-                                        </td>
-                                    </tr>
-                                ))}
-                                </tbody>
-                            </table>
-                        </div>
+                        {/* Top Líderes aquí */}
                     </>
                 );
-            case 'lideres':
+            case 'candidatos':
                 return (
                     <div className="card">
-                        <div className="card-title">Información de Líderes</div>
-                        <p className="p-4">Sección de líderes en desarrollo.</p>
+                        <div className="card-title">Información de Candidatos</div>
+                        <div className="p-4">
+                            {candidatos.length > 0 ? (
+                                <div className="candidatos-grid">
+                                    {candidatos.map((candidato) => (
+                                        <div className="candidato-card" key={candidato.id_candidato}>
+                                            <h3>{candidato.nombre}</h3>
+                                            <p>{candidato.descripcion || 'Sin descripción'}</p>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <p>No hay candidatos registrados.</p>
+                            )}
+                        </div>
                     </div>
                 );
             default:
@@ -232,6 +259,15 @@ const Dashboard = () => {
                             <div className="sidebar-item-label">Dashboard</div>
                         </div>
                         <div
+                            className={`sidebar-item ${activeSection === 'candidatos' ? 'active' : ''}`}
+                            onClick={() => setActiveSection('candidatos')}
+                        >
+                            <div className="sidebar-item-icon">
+                                <PieChart size={24} />
+                            </div>
+                            <div className="sidebar-item-label">Candidatos</div>
+                        </div>
+                        <div
                             className={`sidebar-item ${activeSection === 'lideres' ? 'active' : ''}`}
                             onClick={() => setActiveSection('lideres')}
                         >
@@ -259,3 +295,31 @@ const Dashboard = () => {
 };
 
 export default Dashboard;
+
+// create database votacion;
+// use votacion;
+//
+// DROP TABLE IF EXISTS votaciones;
+// DROP TABLE IF EXISTS candidatos;
+// DROP TABLE IF EXISTS usuarios;
+//
+// CREATE TABLE usuarios (
+//     id_usuario INT AUTO_INCREMENT PRIMARY KEY,
+//     id_huella INT NOT NULL UNIQUE,
+//     registrado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+// );
+//
+// CREATE TABLE candidatos (
+//     id_candidato INT AUTO_INCREMENT PRIMARY KEY,
+//     nombre VARCHAR(100) NOT NULL,
+//     descripcion TEXT
+// );
+//
+// CREATE TABLE votaciones (
+//     id_voto INT AUTO_INCREMENT PRIMARY KEY,
+//     id_usuario INT NOT NULL,
+//     id_candidato INT NOT NULL,
+//     fecha_voto TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+//     FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario),
+//     FOREIGN KEY (id_candidato) REFERENCES candidatos(id_candidato)
+// );
